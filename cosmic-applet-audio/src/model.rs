@@ -89,7 +89,7 @@ pub struct ActiveNode {
     pub mute: bool,
 }
 
-/// Per-application playback/capture streams (sink-input/source-output equivalent).
+/// Per-application playback streams (sink-input equivalent).
 ///
 /// Unlike `Nodes`, there is no "active"/"default" stream concept, so this doesn't
 /// carry the `sorted_display`/`sorted_index`/`active` machinery `Nodes` needs to back
@@ -98,12 +98,10 @@ pub struct ActiveNode {
 pub struct Streams {
     pub id: Vec<NodeId>,
     pub volume: Vec<u32>,
-    pub balance: Vec<Option<f32>>,
-    pub mute: Vec<bool>,
     pub display_name: Vec<Arc<str>>,
     pub app_id: Vec<Arc<str>>,
+    pub icon_name: Vec<Option<Arc<str>>>,
     pub media_name: Vec<Option<Arc<str>>>,
-    pub is_input: Vec<bool>,
 }
 
 impl Streams {
@@ -112,12 +110,10 @@ impl Streams {
             return false;
         };
         self.volume.remove(pos);
-        self.balance.remove(pos);
-        self.mute.remove(pos);
         self.display_name.remove(pos);
         self.app_id.remove(pos);
+        self.icon_name.remove(pos);
         self.media_name.remove(pos);
-        self.is_input.remove(pos);
         self.id.remove(pos);
         true
     }
@@ -138,8 +134,6 @@ impl Model {
                     if self.sources.active == Some(pos) {
                         self.active_source.mute = mute;
                     }
-                } else if let Some(pos) = self.streams.id.iter().position(|id| node_id == *id) {
-                    self.streams.mute[pos] = mute;
                 }
             }
 
@@ -169,7 +163,6 @@ impl Model {
                     }
                 } else if let Some(pos) = self.streams.id.iter().position(|id| node_id == *id) {
                     self.streams.volume[pos] = volume;
-                    self.streams.balance[pos] = balance;
                 }
             }
 
@@ -195,7 +188,7 @@ impl Model {
 
             audio_client::Event::Node(node_id, node) => {
                 self.node_devices.insert(node_id, node.device_id);
-                if matches!(node.kind, NodeKind::StreamOutput | NodeKind::StreamInput) {
+                if matches!(node.kind, Some(NodeKind::StreamOutput)) {
                     let app_id: Arc<str> = node
                         .application_binary
                         .clone()
@@ -208,30 +201,29 @@ impl Model {
                         .or_else(|| node.application_binary.clone())
                         .unwrap_or_else(|| node.name.clone())
                         .into();
-                    let media_name: Option<Arc<str>> =
-                        node.media_name.clone().map(Into::into);
-                    let is_input = matches!(node.kind, NodeKind::StreamInput);
-
+                    let media_name: Option<Arc<str>> = node.media_name.clone().map(Into::into);
+                    let icon_name: Option<Arc<str>> =
+                        node.application_icon_name.clone().map(Into::into);
                     if let Some(pos) = self.streams.id.iter().position(|&id| id == node_id) {
                         self.streams.app_id[pos] = app_id;
                         self.streams.display_name[pos] = display_name;
+                        self.streams.icon_name[pos] = icon_name;
                         self.streams.media_name[pos] = media_name;
-                        self.streams.is_input[pos] = is_input;
                     } else {
                         self.streams.id.push(node_id);
                         self.streams.volume.push(0);
-                        self.streams.balance.push(None);
-                        self.streams.mute.push(false);
                         self.streams.display_name.push(display_name);
                         self.streams.app_id.push(app_id);
+                        self.streams.icon_name.push(icon_name);
                         self.streams.media_name.push(media_name);
-                        self.streams.is_input.push(is_input);
                     }
 
                     return;
                 }
 
-                if matches!(node.kind, NodeKind::Sink) {
+                if matches!(node.kind, Some(NodeKind::Sink))
+                    || (node.kind.is_none() && node.is_sink)
+                {
                     let pos = if let Some(pos) = self.sinks.id.iter().position(|&id| id == node_id)
                     {
                         self.sinks.description[pos] = self.translate(&node.description);
@@ -466,4 +458,63 @@ fn node_name(route: &str, node: &str) -> Arc<str> {
         [route, " - ", node].concat()
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(kind: NodeKind) -> audio_client::NodeInfo {
+        audio_client::NodeInfo {
+            name: "test-node".into(),
+            description: String::new(),
+            device_profile_description: String::new(),
+            device_id: None,
+            card_profile_device: None,
+            is_sink: matches!(kind, NodeKind::Sink),
+            kind: Some(kind),
+            application_name: Some("Test Player".into()),
+            application_binary: Some("test-player".into()),
+            application_icon_name: Some("media-playback-start".into()),
+            media_name: Some("A test track".into()),
+        }
+    }
+
+    #[test]
+    fn playback_stream_tracks_volume_and_removal() {
+        let mut model = Model::default();
+        model.update(audio_client::Event::Node(42, node(NodeKind::StreamOutput)));
+
+        assert_eq!(model.streams.id, [42]);
+        assert_eq!(&*model.streams.display_name[0], "Test Player");
+        assert_eq!(&*model.streams.app_id[0], "test-player");
+        assert_eq!(model.streams.volume, [0]);
+
+        model.update(audio_client::Event::NodeVolume(42, 64, None));
+        assert_eq!(model.streams.volume, [64]);
+
+        model.update(audio_client::Event::RemoveNode(42));
+        assert!(model.streams.id.is_empty());
+        assert!(model.streams.volume.is_empty());
+    }
+
+    #[test]
+    fn device_nodes_do_not_appear_as_playback_streams() {
+        let mut model = Model::default();
+        model.update(audio_client::Event::Node(7, node(NodeKind::Source)));
+
+        assert!(model.streams.id.is_empty());
+    }
+
+    #[test]
+    fn legacy_sink_node_uses_is_sink() {
+        let mut model = Model::default();
+        let mut legacy_sink = node(NodeKind::Sink);
+        legacy_sink.kind = None;
+        legacy_sink.is_sink = true;
+
+        model.update(audio_client::Event::Node(7, legacy_sink));
+
+        assert_eq!(model.sinks.id, [7]);
+    }
 }

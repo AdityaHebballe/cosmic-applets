@@ -21,6 +21,7 @@ use cosmic::{
     desktop::{IconSourceExt, fde},
     iced::{
         self, Alignment, Length, Rectangle, Subscription,
+        advanced::text::EllipsizeHeightLimit,
         futures::StreamExt,
         widget::{self, column, row, slider},
         window,
@@ -34,10 +35,9 @@ use cosmic::{
 };
 use cosmic_settings_audio_client::{self as audio_client, CosmicAudioProxy};
 use futures::SinkExt;
-use iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use mpris_subscription::{MprisRequest, MprisUpdate};
 use mpris2_zbus::player::PlaybackStatus;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
 mod config;
 mod mpris_subscription;
@@ -46,6 +46,7 @@ const GO_BACK: &str = "media-skip-backward-symbolic";
 const GO_NEXT: &str = "media-skip-forward-symbolic";
 const PAUSE: &str = "media-playback-pause-symbolic";
 const PLAY: &str = "media-playback-start-symbolic";
+const STREAM_LABEL_WIDTH: f32 = 80.0;
 
 pub fn run() -> cosmic::iced::Result {
     localize();
@@ -122,23 +123,35 @@ impl Audio {
             .collect::<Vec<_>>();
     }
 
-    /// Resolves an icon for a stream's `app_id` (`application.process.binary`/
-    /// `application.name`, or the raw node name as a last resort).
+    /// Resolves an icon for a stream, preferring PipeWire's
+    /// `application.icon-name` over a desktop-entry lookup.
     ///
     /// This is a looser match than a true desktop-file app-id, so lookups may
     /// occasionally miss — pavucontrol has the same limitation.
-    fn stream_icon(&self, app_id: &str) -> cosmic::widget::Icon {
-        let unicase_appid = fde::unicase::Ascii::new(app_id);
-        let icon_name = fde::find_app_by_id(&self.desktop_entries, unicase_appid)
-            .and_then(|de| de.icon())
-            .unwrap_or(app_id);
+    fn stream_icon(&self, app_id: &str, icon_name: Option<&str>) -> cosmic::widget::icon::Handle {
+        let icon_name = icon_name.unwrap_or_else(|| {
+            let unicase_appid = fde::unicase::Ascii::new(app_id);
+            fde::find_app_by_id(&self.desktop_entries, unicase_appid)
+                // PipeWire commonly reports a process binary (e.g. `zen-bin`),
+                // while the desktop-entry ID is unrelated (e.g. `zen.desktop`).
+                .or_else(|| {
+                    self.desktop_entries.iter().find(|entry| {
+                        entry
+                            .exec()
+                            .and_then(|exec| exec.split_whitespace().next())
+                            .and_then(|command| Path::new(command).file_name())
+                            .is_some_and(|binary| binary.eq_ignore_ascii_case(app_id))
+                    })
+                })
+                .and_then(|de| de.icon())
+                .unwrap_or(app_id)
+        });
         fde::IconSource::from_unknown(icon_name).as_cosmic_icon()
     }
 
     fn stream_row(&self, pos: usize) -> Element<'_, Message> {
         let node_id = self.model.streams.id[pos];
         let volume = self.model.streams.volume[pos];
-        let mute = self.model.streams.mute[pos];
         let display_name = self.model.streams.display_name[pos].as_ref();
         let media_name = self.model.streams.media_name[pos].as_ref();
 
@@ -147,29 +160,28 @@ impl Audio {
         })
         .width(Length::FillPortion(5));
 
-        let mute_icon = if mute || volume == 0 {
-            "audio-volume-muted-symbolic"
-        } else if volume < 33 {
-            "audio-volume-low-symbolic"
-        } else if volume < 66 {
-            "audio-volume-medium-symbolic"
-        } else {
-            "audio-volume-high-symbolic"
-        };
-
-        let mut label = column![text::body(display_name)].width(Length::FillPortion(4));
+        let mut label = column![
+            text::body(display_name)
+                .width(Length::Fixed(STREAM_LABEL_WIDTH))
+                .wrapping(widget::text::Wrapping::None)
+                .ellipsize(widget::text::Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+        ];
         if let Some(media_name) = media_name {
-            label = label.push(text::caption(media_name.as_ref()));
+            label = label.push(
+                text::caption(media_name.as_ref())
+                    .width(Length::Fixed(STREAM_LABEL_WIDTH))
+                    .wrapping(widget::text::Wrapping::None)
+                    .ellipsize(widget::text::Ellipsize::End(EllipsizeHeightLimit::Lines(1))),
+            );
         }
 
         padded_control(
             row![
-                self.stream_icon(&self.model.streams.app_id[pos]),
-                button::icon(icon::from_name(mute_icon).size(24).symbolic(true))
-                    .class(cosmic::theme::Button::Icon)
-                    .icon_size(24)
-                    .line_height(24)
-                    .on_press(Message::ToggleStreamMute(node_id)),
+                icon(self.stream_icon(
+                    &self.model.streams.app_id[pos],
+                    self.model.streams.icon_name[pos].as_deref(),
+                ))
+                .size(24),
                 label,
                 stream_slider,
                 container(text(volume.to_string()).size(16))
@@ -186,9 +198,8 @@ impl Audio {
         let open = self.is_open == IsOpen::Applications;
         let count = self.model.streams.id.len();
 
-        let head = cosmic::widget::column::with_capacity(2)
+        let head = cosmic::widget::column::with_capacity(1)
             .push(text::body(fl!("applications")).width(Length::Fill))
-            .push(text::caption(count.to_string()))
             .apply(menu_button)
             .on_press(Message::ApplicationsToggle);
 
@@ -227,7 +238,6 @@ pub enum Message {
     InputToggle,
     ApplicationsToggle,
     SetStreamVolume(u32, u32),
-    ToggleStreamMute(u32),
     TogglePopup,
     CloseRequested(window::Id),
     ToggleMediaControlsInTopPanel(bool),
@@ -462,17 +472,6 @@ impl cosmic::Application for Audio {
                             .set_node_volume(node_id, volume)
                             .await;
                     });
-                }
-            }
-            Message::ToggleStreamMute(node_id) => {
-                if let Some(pos) = self.model.streams.id.iter().position(|&id| id == node_id) {
-                    let mute = !self.model.streams.mute[pos];
-                    self.model.streams.mute[pos] = mute;
-                    if let Some(ref mut client) = self.audio_client {
-                        futures::executor::block_on(async {
-                            _ = client.borrow_mut().conn.set_node_mute(node_id, mute).await;
-                        });
-                    }
                 }
             }
             Message::Subscription(message) => {
