@@ -18,6 +18,7 @@ use cosmic::{
     cctk::sctk::reexports::calloop,
     cosmic_config::CosmicConfigEntry,
     cosmic_theme::Spacing,
+    desktop::{IconSourceExt, fde},
     iced::{
         self, Alignment, Length, Rectangle, Subscription,
         futures::StreamExt,
@@ -79,6 +80,9 @@ pub struct Audio {
     token_tx: Option<calloop::channel::Sender<TokenRequest>>,
     rectangle_tracker: Option<RectangleTracker<u32>>,
     rectangle: Option<iced::Rectangle>,
+    /// Cached desktop entries, used to resolve stream icons by app id.
+    desktop_entries: Vec<fde::DesktopEntry>,
+    locales: Vec<String>,
 }
 
 impl Audio {
@@ -111,6 +115,92 @@ impl Audio {
             "microphone-sensitivity-high-symbolic"
         }
     }
+
+    fn update_desktop_entries(&mut self) {
+        self.desktop_entries = fde::Iter::new(fde::default_paths())
+            .filter_map(|p| fde::DesktopEntry::from_path(p, Some(&self.locales)).ok())
+            .collect::<Vec<_>>();
+    }
+
+    /// Resolves an icon for a stream's `app_id` (`application.process.binary`/
+    /// `application.name`, or the raw node name as a last resort).
+    ///
+    /// This is a looser match than a true desktop-file app-id, so lookups may
+    /// occasionally miss — pavucontrol has the same limitation.
+    fn stream_icon(&self, app_id: &str) -> cosmic::widget::Icon {
+        let unicase_appid = fde::unicase::Ascii::new(app_id);
+        let icon_name = fde::find_app_by_id(&self.desktop_entries, unicase_appid)
+            .and_then(|de| de.icon())
+            .unwrap_or(app_id);
+        fde::IconSource::from_unknown(icon_name).as_cosmic_icon()
+    }
+
+    fn stream_row(&self, pos: usize) -> Element<'_, Message> {
+        let node_id = self.model.streams.id[pos];
+        let volume = self.model.streams.volume[pos];
+        let mute = self.model.streams.mute[pos];
+        let display_name = self.model.streams.display_name[pos].as_ref();
+        let media_name = self.model.streams.media_name[pos].as_ref();
+
+        let stream_slider = slider(0..=100, volume, move |v| {
+            Message::SetStreamVolume(node_id, v)
+        })
+        .width(Length::FillPortion(5));
+
+        let mute_icon = if mute || volume == 0 {
+            "audio-volume-muted-symbolic"
+        } else if volume < 33 {
+            "audio-volume-low-symbolic"
+        } else if volume < 66 {
+            "audio-volume-medium-symbolic"
+        } else {
+            "audio-volume-high-symbolic"
+        };
+
+        let mut label = column![text::body(display_name)].width(Length::FillPortion(4));
+        if let Some(media_name) = media_name {
+            label = label.push(text::caption(media_name.as_ref()));
+        }
+
+        padded_control(
+            row![
+                self.stream_icon(&self.model.streams.app_id[pos]),
+                button::icon(icon::from_name(mute_icon).size(24).symbolic(true))
+                    .class(cosmic::theme::Button::Icon)
+                    .icon_size(24)
+                    .line_height(24)
+                    .on_press(Message::ToggleStreamMute(node_id)),
+                label,
+                stream_slider,
+                container(text(volume.to_string()).size(16))
+                    .width(Length::FillPortion(1))
+                    .align_x(Alignment::End)
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        )
+        .into()
+    }
+
+    fn applications_revealer(&self) -> Element<'_, Message> {
+        let open = self.is_open == IsOpen::Applications;
+        let count = self.model.streams.id.len();
+
+        let head = cosmic::widget::column::with_capacity(2)
+            .push(text::body(fl!("applications")).width(Length::Fill))
+            .push(text::caption(count.to_string()))
+            .apply(menu_button)
+            .on_press(Message::ApplicationsToggle);
+
+        if open {
+            (0..count).fold(column![head].width(Length::Fill), |col, pos| {
+                col.push(self.stream_row(pos))
+            })
+        } else {
+            column![head]
+        }
+        .into()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]
@@ -119,6 +209,7 @@ enum IsOpen {
     None,
     Output,
     Input,
+    Applications,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +225,9 @@ pub enum Message {
     SetDefaultSource(usize),
     OutputToggle,
     InputToggle,
+    ApplicationsToggle,
+    SetStreamVolume(u32, u32),
+    ToggleStreamMute(u32),
     TogglePopup,
     CloseRequested(window::Id),
     ToggleMediaControlsInTopPanel(bool),
@@ -256,13 +350,13 @@ impl cosmic::Application for Audio {
     const APP_ID: &'static str = "com.system76.CosmicAppletAudio";
 
     fn init(core: cosmic::app::Core, _flags: ()) -> (Self, app::Task<Message>) {
-        (
-            Self {
-                core,
-                ..Default::default()
-            },
-            Task::none(),
-        )
+        let mut app = Self {
+            core,
+            locales: fde::get_languages_from_env(),
+            ..Default::default()
+        };
+        app.update_desktop_entries();
+        (app, Task::none())
     }
 
     fn core(&self) -> &cosmic::app::Core {
@@ -347,6 +441,38 @@ impl cosmic::Application for Audio {
                     IsOpen::None
                 } else {
                     IsOpen::Input
+                }
+            }
+            Message::ApplicationsToggle => {
+                self.is_open = if self.is_open == IsOpen::Applications {
+                    IsOpen::None
+                } else {
+                    IsOpen::Applications
+                }
+            }
+            Message::SetStreamVolume(node_id, volume) => {
+                if let Some(pos) = self.model.streams.id.iter().position(|&id| id == node_id) {
+                    self.model.streams.volume[pos] = volume;
+                }
+                if let Some(ref mut client) = self.audio_client {
+                    futures::executor::block_on(async {
+                        _ = client
+                            .borrow_mut()
+                            .conn
+                            .set_node_volume(node_id, volume)
+                            .await;
+                    });
+                }
+            }
+            Message::ToggleStreamMute(node_id) => {
+                if let Some(pos) = self.model.streams.id.iter().position(|&id| id == node_id) {
+                    let mute = !self.model.streams.mute[pos];
+                    self.model.streams.mute[pos] = mute;
+                    if let Some(ref mut client) = self.audio_client {
+                        futures::executor::block_on(async {
+                            _ = client.borrow_mut().conn.set_node_mute(node_id, mute).await;
+                        });
+                    }
                 }
             }
             Message::Subscription(message) => {
@@ -758,6 +884,12 @@ impl cosmic::Application for Audio {
             ]
             .align_x(Alignment::Start)
         };
+
+        if !self.model.streams.id.is_empty() {
+            audio_content = audio_content
+                .push(padded_control(divider::horizontal::default()).padding([space_xxs, space_s]))
+                .push(self.applications_revealer());
+        }
 
         if let Some(s) = self.player_status.as_ref() {
             let mut elements = Vec::with_capacity(5);
