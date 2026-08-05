@@ -89,3 +89,6 @@ cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols//", 
 # cosmic-dbus-networkmanager = { path = "../dbus-settings-bindings/networkmanager" }
 # upower_dbus = { path = "../dbus-settings-bindings/upower" }
 # nm-secret-agent-manager = { path = "../dbus-settings-bindings/nm-secret-agent-manager" }
+[patch."https://github.com/pop-os/cosmic-settings-daemon"]
+cosmic-settings-audio-client = { git = "https://github.com/AdityaHebballe/cosmic-settings-daemon", rev = "91f88e2b577c9c6f7917ad7ee53429cfa99b860c" }
+cosmic-settings-audio-core = { git = "https://github.com/AdityaHebballe/cosmic-settings-daemon", rev = "91f88e2b577c9c6f7917ad7ee53429cfa99b860c" }

@@ -1439,7 +1439,7 @@ dependencies = [
 [[package]]
 name = "cosmic-settings-audio-client"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/cosmic-settings-daemon#8c54bbbc10485c31e8717c21e119e19b87eeb3ea"
+source = "git+https://github.com/AdityaHebballe/cosmic-settings-daemon?rev=91f88e2b577c9c6f7917ad7ee53429cfa99b860c#91f88e2b577c9c6f7917ad7ee53429cfa99b860c"
 dependencies = [
  "cosmic-settings-audio-core",
  "dirs",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "cosmic-settings-audio-core"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/cosmic-settings-daemon#8c54bbbc10485c31e8717c21e119e19b87eeb3ea"
+source = "git+https://github.com/AdityaHebballe/cosmic-settings-daemon?rev=91f88e2b577c9c6f7917ad7ee53429cfa99b860c#91f88e2b577c9c6f7917ad7ee53429cfa99b860c"
 dependencies = [
  "dirs",
  "ron 0.12.2",
