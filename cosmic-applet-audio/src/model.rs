@@ -105,6 +105,35 @@ pub struct Streams {
 }
 
 impl Streams {
+    /// Returns the first stream for each application, in stream creation order.
+    pub fn application_positions(&self) -> Vec<usize> {
+        let mut application_ids = Vec::new();
+        let mut positions = Vec::new();
+        for (pos, app_id) in self.app_id.iter().enumerate() {
+            if !application_ids.contains(app_id) {
+                positions.push(pos);
+                application_ids.push(app_id.clone());
+            }
+        }
+        positions
+    }
+
+    /// Updates every stream belonging to an application and returns its node IDs.
+    pub fn set_application_volume(&mut self, app_id: &str, volume: u32) -> Vec<NodeId> {
+        self.app_id
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, stream_app_id)| {
+                if stream_app_id.as_ref() == app_id {
+                    self.volume[pos] = volume;
+                    Some(self.id[pos])
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn remove(&mut self, node_id: u32) -> bool {
         let Some(pos) = self.id.iter().position(|id| node_id == *id) else {
             return false;
@@ -496,6 +525,24 @@ mod tests {
         model.update(audio_client::Event::RemoveNode(42));
         assert!(model.streams.id.is_empty());
         assert!(model.streams.volume.is_empty());
+    }
+
+    #[test]
+    fn groups_streams_and_updates_their_volume_together() {
+        let mut model = Model::default();
+        model.update(audio_client::Event::Node(1, node(NodeKind::StreamOutput)));
+        model.update(audio_client::Event::Node(2, node(NodeKind::StreamOutput)));
+
+        let mut other = node(NodeKind::StreamOutput);
+        other.application_binary = Some("other-player".into());
+        model.update(audio_client::Event::Node(3, other));
+
+        assert_eq!(model.streams.application_positions(), [0, 2]);
+        assert_eq!(
+            model.streams.set_application_volume("test-player", 64),
+            [1, 2]
+        );
+        assert_eq!(model.streams.volume, [64, 64, 0]);
     }
 
     #[test]

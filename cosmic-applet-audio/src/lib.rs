@@ -170,13 +170,13 @@ impl Audio {
     }
 
     fn stream_row(&self, pos: usize) -> Element<'_, Message> {
-        let node_id = self.model.streams.id[pos];
         let volume = self.model.streams.volume[pos];
         let display_name = self.model.streams.display_name[pos].as_ref();
         let media_name = self.model.streams.media_name[pos].as_ref();
+        let app_id = self.model.streams.app_id[pos].clone();
 
         let stream_slider = slider(0..=100, volume, move |v| {
-            Message::SetStreamVolume(node_id, v)
+            Message::SetApplicationVolume(app_id.clone(), v)
         })
         .width(Length::FillPortion(5));
 
@@ -217,7 +217,6 @@ impl Audio {
 
     fn applications_revealer(&self) -> Element<'_, Message> {
         let open = self.is_open == IsOpen::Applications;
-        let count = self.model.streams.id.len();
 
         let head = cosmic::widget::column::with_capacity(1)
             .push(text::body(fl!("applications")).width(Length::Fill))
@@ -225,9 +224,13 @@ impl Audio {
             .on_press(Message::ApplicationsToggle);
 
         if open {
-            (0..count).fold(column![head].width(Length::Fill), |col, pos| {
-                col.push(self.stream_row(pos))
-            })
+            self.model
+                .streams
+                .application_positions()
+                .into_iter()
+                .fold(column![head].width(Length::Fill), |col, pos| {
+                    col.push(self.stream_row(pos))
+                })
         } else {
             column![head]
         }
@@ -249,7 +252,7 @@ pub enum Message {
     /// Connection to `com.system76.CosmicSettings`.
     Client(Arc<audio_client::Client>),
     ApplicationsToggle,
-    SetStreamVolume(u32, u32),
+    SetApplicationVolume(Arc<str>, u32),
     CloseRequested(window::Id),
     ConfigChanged(AudioAppletConfig),
     Ignore,
@@ -487,17 +490,17 @@ impl cosmic::Application for Audio {
                     IsOpen::Applications
                 }
             }
-            Message::SetStreamVolume(node_id, volume) => {
-                if let Some(pos) = self.model.streams.id.iter().position(|&id| id == node_id) {
-                    self.model.streams.volume[pos] = volume;
-                }
+            Message::SetApplicationVolume(app_id, volume) => {
+                let node_ids = self.model.streams.set_application_volume(&app_id, volume);
                 if let Some(ref mut client) = self.audio_client {
                     futures::executor::block_on(async {
-                        _ = client
-                            .borrow_mut()
-                            .conn
-                            .set_node_volume(node_id, volume)
-                            .await;
+                        for node_id in node_ids {
+                            _ = client
+                                .borrow_mut()
+                                .conn
+                                .set_node_volume(node_id, volume)
+                                .await;
+                        }
                     });
                 }
             }
