@@ -24,4 +24,5 @@ intmap = "3.1.3"
 
 [dependencies.cosmic-settings-audio-client]
 git = "https://github.com/pop-os/cosmic-settings-daemon"
+rev = "e4d2a74f5115091940f6ea09f730863f74f34758"
 features = ["codec"]

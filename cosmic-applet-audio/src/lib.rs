@@ -495,11 +495,7 @@ impl cosmic::Application for Audio {
                 if let Some(ref mut client) = self.audio_client {
                     futures::executor::block_on(async {
                         for node_id in node_ids {
-                            _ = client
-                                .borrow_mut()
-                                .conn
-                                .set_node_volume(node_id, volume)
-                                .await;
+                            _ = client.conn.set_node_volume(node_id, volume).await;
                         }
                     });
                 }

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use cosmic_settings_audio_client::{self as audio_client, Availability, NodeKind, RouteInfo};
+use cosmic_settings_audio_client::{self as audio_client, Availability, RouteInfo};
 use intmap::IntMap;
 
 pub type DeviceId = u32;
@@ -215,44 +215,39 @@ impl Model {
                 }
             }
 
+            audio_client::Event::Playback(node_id, playback) => {
+                let app_id: Arc<str> = playback
+                    .application_id
+                    .clone()
+                    .or_else(|| playback.application_name.clone())
+                    .unwrap_or_else(|| playback.node_name.clone())
+                    .into();
+                let display_name: Arc<str> = playback
+                    .application_name
+                    .clone()
+                    .or_else(|| playback.application_id.clone())
+                    .unwrap_or_else(|| playback.node_name.clone())
+                    .into();
+                let media_name: Option<Arc<str>> = playback.media_name.clone().map(Into::into);
+                let icon_name: Option<Arc<str>> = playback.icon_name.clone().map(Into::into);
+                if let Some(pos) = self.streams.id.iter().position(|&id| id == node_id) {
+                    self.streams.app_id[pos] = app_id;
+                    self.streams.display_name[pos] = display_name;
+                    self.streams.icon_name[pos] = icon_name;
+                    self.streams.media_name[pos] = media_name;
+                } else {
+                    self.streams.id.push(node_id);
+                    self.streams.volume.push(0);
+                    self.streams.display_name.push(display_name);
+                    self.streams.app_id.push(app_id);
+                    self.streams.icon_name.push(icon_name);
+                    self.streams.media_name.push(media_name);
+                }
+            }
+
             audio_client::Event::Node(node_id, node) => {
                 self.node_devices.insert(node_id, node.device_id);
-                if matches!(node.kind, Some(NodeKind::StreamOutput)) {
-                    let app_id: Arc<str> = node
-                        .application_binary
-                        .clone()
-                        .or_else(|| node.application_name.clone())
-                        .unwrap_or_else(|| node.name.clone())
-                        .into();
-                    let display_name: Arc<str> = node
-                        .application_name
-                        .clone()
-                        .or_else(|| node.application_binary.clone())
-                        .unwrap_or_else(|| node.name.clone())
-                        .into();
-                    let media_name: Option<Arc<str>> = node.media_name.clone().map(Into::into);
-                    let icon_name: Option<Arc<str>> =
-                        node.application_icon_name.clone().map(Into::into);
-                    if let Some(pos) = self.streams.id.iter().position(|&id| id == node_id) {
-                        self.streams.app_id[pos] = app_id;
-                        self.streams.display_name[pos] = display_name;
-                        self.streams.icon_name[pos] = icon_name;
-                        self.streams.media_name[pos] = media_name;
-                    } else {
-                        self.streams.id.push(node_id);
-                        self.streams.volume.push(0);
-                        self.streams.display_name.push(display_name);
-                        self.streams.app_id.push(app_id);
-                        self.streams.icon_name.push(icon_name);
-                        self.streams.media_name.push(media_name);
-                    }
-
-                    return;
-                }
-
-                if matches!(node.kind, Some(NodeKind::Sink))
-                    || (node.kind.is_none() && node.is_sink)
-                {
+                if node.is_sink {
                     let pos = if let Some(pos) = self.sinks.id.iter().position(|&id| id == node_id)
                     {
                         self.sinks.description[pos] = self.translate(&node.description);
@@ -493,26 +488,31 @@ fn node_name(route: &str, node: &str) -> Arc<str> {
 mod tests {
     use super::*;
 
-    fn node(kind: NodeKind) -> audio_client::NodeInfo {
+    fn node(is_sink: bool) -> audio_client::NodeInfo {
         audio_client::NodeInfo {
             name: "test-node".into(),
             description: String::new(),
             device_profile_description: String::new(),
             device_id: None,
             card_profile_device: None,
-            is_sink: matches!(kind, NodeKind::Sink),
-            kind: Some(kind),
+            is_sink,
+        }
+    }
+
+    fn playback(app_id: &str) -> audio_client::PlaybackInfo {
+        audio_client::PlaybackInfo {
+            application_id: Some(app_id.into()),
             application_name: Some("Test Player".into()),
-            application_binary: Some("test-player".into()),
-            application_icon_name: Some("media-playback-start".into()),
+            icon_name: Some("media-playback-start".into()),
             media_name: Some("A test track".into()),
+            node_name: "test-node".into(),
         }
     }
 
     #[test]
     fn playback_stream_tracks_volume_and_removal() {
         let mut model = Model::default();
-        model.update(audio_client::Event::Node(42, node(NodeKind::StreamOutput)));
+        model.update(audio_client::Event::Playback(42, playback("test-player")));
 
         assert_eq!(model.streams.id, [42]);
         assert_eq!(&*model.streams.display_name[0], "Test Player");
@@ -530,12 +530,10 @@ mod tests {
     #[test]
     fn groups_streams_and_updates_their_volume_together() {
         let mut model = Model::default();
-        model.update(audio_client::Event::Node(1, node(NodeKind::StreamOutput)));
-        model.update(audio_client::Event::Node(2, node(NodeKind::StreamOutput)));
+        model.update(audio_client::Event::Playback(1, playback("test-player")));
+        model.update(audio_client::Event::Playback(2, playback("test-player")));
 
-        let mut other = node(NodeKind::StreamOutput);
-        other.application_binary = Some("other-player".into());
-        model.update(audio_client::Event::Node(3, other));
+        model.update(audio_client::Event::Playback(3, playback("other-player")));
 
         assert_eq!(model.streams.application_positions(), [0, 2]);
         assert_eq!(
@@ -548,19 +546,15 @@ mod tests {
     #[test]
     fn device_nodes_do_not_appear_as_playback_streams() {
         let mut model = Model::default();
-        model.update(audio_client::Event::Node(7, node(NodeKind::Source)));
+        model.update(audio_client::Event::Node(7, node(false)));
 
         assert!(model.streams.id.is_empty());
     }
 
     #[test]
-    fn legacy_sink_node_uses_is_sink() {
+    fn sink_node_uses_is_sink() {
         let mut model = Model::default();
-        let mut legacy_sink = node(NodeKind::Sink);
-        legacy_sink.kind = None;
-        legacy_sink.is_sink = true;
-
-        model.update(audio_client::Event::Node(7, legacy_sink));
+        model.update(audio_client::Event::Node(7, node(true)));
 
         assert_eq!(model.sinks.id, [7]);
     }
